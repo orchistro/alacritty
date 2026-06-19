@@ -498,7 +498,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         self.ctx.mouse_mut().block_hint_launcher = true;
 
         if (lmb_pressed || rmb_pressed)
-            && (self.ctx.modifiers().state().shift_key() || !self.ctx.mouse_mode())
+            && (self.ctx.modifiers().state().super_key() || !self.ctx.mouse_mode())
         {
             self.ctx.update_selection(point, cell_side);
         } else if cell_changed
@@ -615,8 +615,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     fn on_mouse_press(&mut self, button: MouseButton) {
+        // A user mouse binding handles this click locally, so don't forward it.
+        let binding_handled = self.mouse_binding_triggered(&MouseEvent::Button(button));
+
         // Handle mouse mode.
-        if !self.ctx.modifiers().state().shift_key() && self.ctx.mouse_mode() {
+        if !self.ctx.modifiers().state().super_key() && self.ctx.mouse_mode() && !binding_handled {
             self.ctx.mouse_mut().click_state = ClickState::None;
 
             let code = match button {
@@ -694,7 +697,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     fn on_mouse_release(&mut self, button: MouseButton) {
-        if !self.ctx.modifiers().state().shift_key() && self.ctx.mouse_mode() {
+        // Suppress the release report too when a binding consumed the press,
+        // so the application doesn't see a dangling release.
+        let binding_handled = self.mouse_binding_triggered(&MouseEvent::Button(button));
+
+        if !self.ctx.modifiers().state().super_key() && self.ctx.mouse_mode() && !binding_handled {
             let code = match button {
                 MouseButton::Left => 0,
                 MouseButton::Middle => 1,
@@ -797,7 +804,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             .terminal()
             .mode()
             .contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
-            && !self.ctx.modifiers().state().shift_key()
+            && !self.ctx.modifiers().state().super_key()
         {
             // The chars here are the same as for the respective arrow keys.
             let line_cmd = if is_scroll_up { b'A' } else { b'B' };
@@ -1067,6 +1074,27 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         match_found
     }
 
+    /// Check whether a mouse binding would be triggered by this event.
+    ///
+    /// Used to withhold the click from the application when a user binding
+    /// handles it, instead of also forwarding it as a mouse report. This
+    /// mirrors the gating in [`Self::process_mouse_bindings`] but performs no
+    /// side effects, so it is safe to call before `click_state` is updated.
+    fn mouse_binding_triggered(&mut self, event: &MouseEvent) -> bool {
+        let mode = BindingMode::new(self.ctx.terminal().mode(), self.ctx.search_active());
+        let mouse_mode = self.ctx.mouse_mode();
+        let mods = self.ctx.modifiers().state();
+        let fallback_allowed = mouse_mode && mods.contains(ModifiersState::SHIFT);
+        let mouse_bindings = self.ctx.config().mouse_bindings();
+
+        let matches = |binding_mods| {
+            mouse_bindings.iter().any(|binding| binding.is_triggered_by(mode, binding_mods, event))
+        };
+
+        (matches(mods) && (fallback_allowed || !mouse_mode))
+            || (fallback_allowed && matches(mods & !ModifiersState::SHIFT))
+    }
+
     /// Check mouse icon state in relation to the message bar.
     fn message_bar_cursor_state(&self) -> Option<CursorIcon> {
         // Since search is above the message bar, the button is offset by search's height.
@@ -1105,7 +1133,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             mouse_state
         } else if self.ctx.display().highlighted_hint.as_ref().is_some_and(hint_highlighted) {
             CursorIcon::Pointer
-        } else if !self.ctx.modifiers().state().shift_key() && self.ctx.mouse_mode() {
+        } else if !self.ctx.modifiers().state().super_key() && self.ctx.mouse_mode() {
             CursorIcon::Default
         } else {
             CursorIcon::Text
